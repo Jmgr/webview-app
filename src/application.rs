@@ -34,6 +34,16 @@ impl Application {
         self.app.get_appid()
     }
 
+    /// Enable or disable allowing multiple instances of the application on Linux.
+    ///
+    /// When enabled, this sets `gio::ApplicationFlags::NON_UNIQUE`, so starting a
+    /// second instance does not activate an already-running instance.
+    #[cfg(target_os = "linux")]
+    pub fn non_unique(&self, enabled: bool) -> &Self {
+        self.app.set_non_unique(enabled);
+        self
+    }
+
     /// when the application is started, this method is being called to give you the opportunity to 
     /// create the WebView. The callback expects a WebView build with the WebViewBuilder.
     pub fn on_activate(&self, val: impl Fn(&Application)->WebView + 'static)->&Self {
@@ -52,5 +62,4 @@ impl Application {
         self.app.run()
     }
 }
-
 
