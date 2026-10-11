@@ -1,4 +1,6 @@
-use std::{cell::RefCell, ffi::c_void, mem, path::Path, ptr, rc::Rc, sync::mpsc};
+use std::{cell::RefCell, ffi::c_void, mem, path::{Component, Path}, ptr, rc::Rc, sync::mpsc};
+
+use percent_encoding::percent_decode_str;
 
 use webview2_com::{
     AddScriptToExecuteOnDocumentCreatedCompletedHandler, CoTaskMemPWSTR, CoreWebView2CustomSchemeRegistration, CoreWebView2EnvironmentOptions,
@@ -62,7 +64,6 @@ pub struct WebView {
     _console_event_receiver: Option<(Rc<ICoreWebView2DevToolsProtocolEventReceiver>, i64)>,
 }
 
-
 impl Drop for WebViewController {
     fn drop(&mut self) {
         unsafe { self.0.Close() }.unwrap();
@@ -90,7 +91,26 @@ impl WebView {
                 unsafe { options.set_additional_browser_arguments("--enable-features=msWebView2EnableDraggableRegions".to_string()) };
             }
             let scheme_registration = CoreWebView2CustomSchemeRegistration::new("req".to_string());
-            unsafe { options.set_scheme_registrations(vec![Some(ICoreWebView2CustomSchemeRegistration::from(scheme_registration))]); }
+            unsafe {
+                // WebView2 must know that `req://webroot/...` contains a host. Without this,
+                // `req` URLs have opaque origins, so relative module and WASM requests fail
+                // same-origin checks.
+                scheme_registration.set_has_authority_component(true);
+
+                // The webroot is application code embedded in the executable, so expose it as
+                // a secure context rather than treating it like untrusted network content.
+                scheme_registration.set_treat_as_secure(true);
+
+                // Allow only the webroot's own origin to request `req` resources. Do not use `*`:
+                // cross-origin access should require a separate, explicit API decision.
+                scheme_registration.set_allowed_origins(vec!["req://webroot".to_string()]);
+
+                // Keep this registration constant for every view: WebView2 requires views that
+                // share a user-data directory to register custom schemes identically.
+                options.set_scheme_registrations(vec![Some(
+                    ICoreWebView2CustomSchemeRegistration::from(scheme_registration),
+                )]);
+            }
 
             let local_path_clone = local_path.clone();
             CreateCoreWebView2EnvironmentCompletedHandler::wait_for_async_operation(
@@ -294,17 +314,15 @@ impl WebView {
                             request.Uri(&mut uri).unwrap();
                             let uri = CoTaskMemPWSTR::from(uri);
                             let uri = uri.to_string();
-                            if uri.starts_with("req://webroot") {
-                                let end_pos = uri.find('?');
-                                let path = if let Some(end_pos) = end_pos { &uri[14..end_pos] } else { &uri[14..] };
-                                match params.webroot.clone().expect("Custom request without webroot").lock().unwrap().get_file(path) {
+                            if let Some(path) = webroot_path(&uri) {
+                                match params.webroot.clone().expect("Custom request without webroot").lock().unwrap().get_file(&path) {
                                     Some(file)  => {
                                         let content = file.contents();
-                                        let response = send_custom_response(&environment_clone, content, &path);
+                                        let response = send_custom_response(&environment_clone, content, &path, 200);
                                         args.SetResponse(&response).unwrap();
                                     },
                                     None => {
-                                        let response = send_custom_response(&environment_clone, html::not_found().as_bytes(), ".html");
+                                        let response = send_custom_response(&environment_clone, html::not_found().as_bytes(), ".html", 404);
                                         args.SetResponse(&response).unwrap();
                                     } 
                                 }
@@ -590,16 +608,43 @@ fn get_window_size(hwnd: HWND) -> SIZE {
     }
 }
 
-fn send_custom_response(environment: &ICoreWebView2Environment, content: &[u8], url: &str)-> ICoreWebView2WebResourceResponse {
+fn webroot_path(uri: &str) -> Option<String> {
+    // Parsing the URL separates the query/fragment from the asset path and verifies that the
+    // request is for the exact origin served by the embedded webroot.
+    let uri = url::Url::parse(uri).ok()?;
+    if uri.scheme() != "req" || uri.host_str() != Some("webroot") {
+        return None;
+    }
+
+    // WebView2 supplies URL-encoded paths. Decode them for include_dir, but accept only normal
+    // relative components so an encoded separator cannot turn into path traversal on Windows.
+    let path = percent_decode_str(uri.path().trim_start_matches('/'))
+        .decode_utf8()
+        .ok()?
+        .into_owned();
+    Path::new(&path)
+        .components()
+        .all(|component| matches!(component, Component::Normal(_)))
+        .then_some(path)
+}
+
+fn send_custom_response(environment: &ICoreWebView2Environment, content: &[u8], url: &str, status_code: i32)-> ICoreWebView2WebResourceResponse {
     unsafe {
         let stream = SHCreateMemStream(Some(content)).expect("create response stream");
 
+        // In particular, instantiateStreaming requires an exact `application/wasm` response.
+        // Deliberately omit Access-Control-Allow-Origin: the webroot is same-origin by default.
         let content_type = format!("Content-Type: {}", content_type::get(url));
         let content_type = string_to_pcwstr(content_type.as_str());
+        let reason_phrase = match status_code {
+            200 => w!("OK"),
+            404 => w!("Not Found"),
+            _ => w!("Unknown"),
+        };
         environment.CreateWebResourceResponse(
             &stream,
-            200, // HTTP Status 200 OK
-            w!("OK"),
+            status_code,
+            reason_phrase,
             PCWSTR(content_type.as_ptr())
         ).unwrap()
     }
@@ -610,4 +655,31 @@ fn sendscript(hwnd: HWND, script: &str) {
     let wparam: WPARAM = WPARAM(js.take().as_ptr() as usize);
     let lparam: LPARAM = LPARAM(0);   
     unsafe { PostMessageW(Some(hwnd), APP_SENDSCRIPT, wparam, lparam).unwrap() };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::webroot_path;
+
+    #[test]
+    fn resolves_nested_webroot_paths_without_the_query() {
+        assert_eq!(
+            webroot_path("req://webroot/nested/pkg/app.wasm?cache=1"),
+            Some("nested/pkg/app.wasm".to_string())
+        );
+    }
+
+    #[test]
+    fn decodes_webroot_asset_paths() {
+        assert_eq!(
+            webroot_path("req://webroot/assets/hello%20world.css"),
+            Some("assets/hello world.css".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_other_origins_and_traversal() {
+        assert_eq!(webroot_path("req://other/index.html"), None);
+        assert_eq!(webroot_path("req://webroot/%2e%2e%5csecret.txt"), None);
+    }
 }
