@@ -23,6 +23,12 @@ impl Application {
         }).unwrap_or("de.uriegel.webviewapp".to_string())
     }
 
+    pub fn set_non_unique(&self, enabled: bool) {
+        let mut flags = self.app.flags();
+        flags.set(gtk::gio::ApplicationFlags::NON_UNIQUE, enabled);
+        self.app.set_flags(flags);
+    }
+
     pub fn on_activate(&self, val: impl Fn()->WebView + 'static) {
         self.app.connect_activate(move |_| {
             val();
