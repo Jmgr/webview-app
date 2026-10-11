@@ -21,7 +21,7 @@ impl Application {
     /// It is also used as path part to a directory to share window settings
     /// 
     /// * Windows: ```$LOCALAPPDATA$/<appid>```
-    /// * Linux:  ```~/.config/<appid>```
+    /// * Linux:  ```$XDG_CONFIG_HOME/<appid>```, or ```~/.config/<appid>``` when ```XDG_CONFIG_HOME``` is not set
     /// 
     pub fn new(appid: &str)->Self {
         Application {

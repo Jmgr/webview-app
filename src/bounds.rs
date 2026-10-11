@@ -24,7 +24,9 @@ impl Bounds {
     pub fn save(&self, config_dir: &str)->() {
         if !self.is_maximized {
             let json = serde_json::to_string(&self).unwrap();
-            fs::write(Path::new(config_dir).join("bounds.json"), json).unwrap();
+            let path = Path::new(config_dir).join("bounds.json");
+            let _r = fs::write(&path, json)
+                .inspect_err(|err|eprintln!("Could not save window bounds to {}: {:?}", path.display(), err));
         }
     }
 }
