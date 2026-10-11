@@ -25,6 +25,39 @@ pub struct Request {
     pub(crate) hwnd: isize
 }
 
+impl Request {
+    /// Closes the application through its normal window-close path.
+    ///
+    /// This is intended for request handlers registered with
+    /// [`WebView::connect_request`](crate::webview::WebView::connect_request),
+    /// for example after JavaScript calls `WebView.request("quit", {})`.
+    #[cfg(target_os = "linux")]
+    pub fn quit_application(&self) {
+        use gtk::prelude::*;
+
+        if let Some(window) = self.webview.root().and_downcast::<gtk::Window>() {
+            window.close();
+        }
+    }
+
+    /// Closes the application through its normal window-close path.
+    ///
+    /// This is intended for request handlers registered with
+    /// [`WebView::connect_request`](crate::webview::WebView::connect_request),
+    /// for example after JavaScript calls `WebView.request("quit", {})`.
+    #[cfg(target_os = "windows")]
+    pub fn quit_application(&self) {
+        use std::ffi::c_void;
+        use windows::Win32::{
+            Foundation::{HWND, LPARAM, WPARAM},
+            UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE},
+        };
+
+        let hwnd = HWND(self.hwnd as *mut c_void);
+        let _ = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+    }
+}
+
 /// Handling an incoming request from javascript.
 /// 
 /// The callback function has to be non blocking and async
