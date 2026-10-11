@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{env, fs, path::PathBuf};
 
 use gtk::prelude::*;
 use gtk::ApplicationWindow;
@@ -17,16 +17,15 @@ pub struct WebView {
 
 impl WebView {
     pub fn new(params: Params)->Self {
-        let home = std::env::var("HOME").expect("No HOME directory");
-        let config_dir = Path::new(&home).join(".config").join(params.app.get_appid());
-        if !fs::exists(config_dir.clone()).expect("Could not access local directory") 
-            { fs::create_dir(config_dir.clone()).expect("Could not create local directory") } 
-        let config_dir = config_dir.to_string_lossy().to_string();
-        let bounds = 
+        let config_dir = 
         if params.save_bounds
-            {Bounds::restore(&config_dir).unwrap_or(params.bounds)} 
+            {config_dir(&params.app.get_appid())} 
         else
-            {params.bounds};
+            {None};
+        let bounds = config_dir
+            .as_deref()
+            .and_then(Bounds::restore)
+            .unwrap_or(params.bounds);
 
         let webkitview_params = WebkitViewParams {
             url: &params.url.unwrap_or("about:plain"),
@@ -54,7 +53,7 @@ impl WebView {
         window.set_default_width(bounds.width.unwrap_or(800));
         window.set_default_height(bounds.height.unwrap_or(800));
 
-        if params.save_bounds {
+        if let Some(config_dir) = config_dir {
             let gtkwindow = window.clone();
             window.connect_close_request(move|_| {
                 let bounds = Bounds {
@@ -122,4 +121,28 @@ r##"
     </object>
 </interface>
 "##
+}
+
+/// The directory window bounds are saved in: `$XDG_CONFIG_HOME/<appid>`, or `~/.config/<appid>`
+/// when `XDG_CONFIG_HOME` is not set. Returns `None`, so that bounds are not saved, when neither
+/// variable is set or the directory cannot be created.
+fn config_dir(appid: &str)->Option<String> {
+    // The XDG base directory specification says to ignore relative (and empty) paths.
+    let base = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
+    let Some(base) = base else {
+        eprintln!("Neither XDG_CONFIG_HOME nor HOME is set, window bounds will not be saved");
+        return None;
+    };
+
+    let config_dir = base.join(appid);
+    match fs::create_dir_all(&config_dir) {
+        Ok(()) => Some(config_dir.to_string_lossy().to_string()),
+        Err(err) => {
+            eprintln!("Could not create {}, window bounds will not be saved: {:?}", config_dir.display(), err);
+            None
+        }
+    }
 }
